@@ -16,7 +16,20 @@ import os
 import pandas as pd
 
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "all-MiniLM-L6-v2")
-TOP_K = int(os.environ.get("TOP_K", "3"))
+
+
+def _read_top_k() -> int:
+    raw = os.environ.get("TOP_K", "3")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"TOP_K must be an integer, got {raw!r}") from exc
+    if value < 1:
+        raise ValueError(f"TOP_K must be >= 1, got {value}")
+    return value
+
+
+TOP_K = _read_top_k()
 
 
 def serialize_rows(df: pd.DataFrame) -> list[str]:
@@ -26,6 +39,9 @@ def serialize_rows(df: pd.DataFrame) -> list[str]:
 
 def build_index(documents: list[str]):
     """Embed documents and build a FAISS index. Returns (model, index)."""
+    if not documents:
+        raise ValueError("No documents to index — is the CSV empty?")
+
     import faiss
     import numpy as np
     from sentence_transformers import SentenceTransformer
@@ -56,7 +72,13 @@ def answer(query: str, rows: list[str]) -> str:
         f"the answer, say so.\n\nRows:\n{context}\n\nQuestion: {query}\nAnswer:"
     )
     model = os.environ.get("OLLAMA_MODEL", "llama3")
-    response = ollama.chat(model=model, messages=[{"role": "user", "content": prompt}])
+    try:
+        response = ollama.chat(model=model, messages=[{"role": "user", "content": prompt}])
+    except Exception as exc:  # noqa: BLE001  surface a controlled error
+        raise RuntimeError(
+            "Failed to reach Ollama for answer generation. Is the daemon running "
+            f"and model '{model}' pulled?"
+        ) from exc
     return response["message"]["content"]
 
 
@@ -66,7 +88,12 @@ def main() -> None:
     parser.add_argument("--generate", action="store_true", help="Phrase an answer with an LLM")
     args = parser.parse_args()
 
-    documents = serialize_rows(pd.read_csv(args.csv))
+    try:
+        df = pd.read_csv(args.csv)
+    except (FileNotFoundError, pd.errors.EmptyDataError, pd.errors.ParserError) as exc:
+        raise SystemExit(f"Could not read CSV '{args.csv}': {exc}") from exc
+
+    documents = serialize_rows(df)
     model, index = build_index(documents)
     print("Ready. Ask questions (Ctrl-C to quit).")
     try:
